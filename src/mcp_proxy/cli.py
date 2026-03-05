@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 
 import uvicorn
 
@@ -14,6 +15,20 @@ from mcp_proxy.server import AppState, create_app
 from mcp_proxy.telemetry.http_sink import HttpTelemetrySink
 from mcp_proxy.telemetry.noop_sink import NoopTelemetrySink
 from mcp_proxy.telemetry.pipeline import TelemetryPipeline
+
+
+def parse_listen(value: str) -> tuple[str, int]:
+    """Parse host:port listen value."""
+    host, sep, raw_port = value.rpartition(":")
+    if not sep or not host or not raw_port:
+        raise argparse.ArgumentTypeError("--listen must be in host:port format")
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("listen port must be an integer") from exc
+    if port < 1 or port > 65535:
+        raise argparse.ArgumentTypeError("listen port must be between 1 and 65535")
+    return host, port
 
 
 def build_state(config_path: str) -> AppState:
@@ -46,14 +61,37 @@ def build_state(config_path: str) -> AppState:
 def main() -> None:
     """Run CLI server."""
     parser = argparse.ArgumentParser(description="MCP multi-upstream proxy")
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8080)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    serve = subparsers.add_parser("serve", help="Run MCP proxy server")
+    serve.add_argument("--listen", type=parse_listen, default=parse_listen("127.0.0.1:8000"))
+    serve.add_argument("--config", required=True)
+    serve.add_argument("--log-level", default="info")
+    serve.add_argument("--health-path", default="/health")
+    serve.add_argument("--request-timeout", type=float, default=30.0)
+    serve.add_argument("--idle-timeout", type=int, default=5)
+    serve.add_argument("--max-queue", type=int, default=2048)
+    serve.add_argument("--reload", action="store_true")
+
     args = parser.parse_args()
 
+    if args.command != "serve":
+        parser.error(f"unsupported command: {args.command}")
+
+    logging.getLogger().setLevel(args.log_level.upper())
+
     state = build_state(args.config)
-    app = create_app(state)
-    uvicorn.run(app, host=args.host, port=args.port)
+    app = create_app(state, health_path=args.health_path, request_timeout_s=args.request_timeout)
+    host, port = args.listen
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level=args.log_level,
+        timeout_keep_alive=args.idle_timeout,
+        backlog=args.max_queue,
+        reload=args.reload,
+    )
 
 
 if __name__ == "__main__":
